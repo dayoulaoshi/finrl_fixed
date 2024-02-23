@@ -99,7 +99,7 @@ class StockTradingEnv(gym.Env):
         self.state_memory = (
             []
         )  # we need sometimes to preserve the state in the middle of trading process
-        self.date_memory = [self._get_date()]
+        self.date_memory = []
         #         self.logger = Logger('results',[CSVOutputFormat])
         # self.reset()
 
@@ -120,22 +120,26 @@ class StockTradingEnv(gym.Env):
                 # if self.state[index + 1] > 0: # if we use price<0 to denote a stock is unable to trade in that day, the total asset calculation may be wrong for the price is unreasonable
                 # Sell only if the price is > 0 (no missing data in this particular date)
                 # perform sell action based on the sign of the action
-                if self.state[index + self.stock_dim + 1] > 0:
+
+                
+                if self.state[index + self.stock_dim*self.rebalancing_period + 1] > 0:
                     # Sell only if current asset is > 0
                     sell_num_shares = min(
-                        abs(action), self.state[index + self.stock_dim + 1]
+                        abs(action), self.state[index + self.stock_dim*self.rebalancing_period + 1]
                     )
+
+                    #这里感觉有问题，知道了收盘价再卖出（不可能实现），
                     sell_amount = (
-                        self.state[index + 1]
+                        self.state[index + 1 + self.stock_dim*(self.rebalancing_period-1)]
                         * sell_num_shares
                         * (1 - self.sell_cost_pct[index])
                     )
                     # update balance
                     self.state[0] += sell_amount
 
-                    self.state[index + self.stock_dim + 1] -= sell_num_shares
+                    self.state[index + self.stock_dim*self.rebalancing_period + 1] -= sell_num_shares
                     self.cost += (
-                        self.state[index + 1]
+                        self.state[1+(self.rebalancing_period-1)*self.stock_dim+index]
                         * sell_num_shares
                         * self.sell_cost_pct[index]
                     )
@@ -188,28 +192,30 @@ class StockTradingEnv(gym.Env):
     def _buy_stock(self, index, action):
         def _do_buy():
             if (
-                self.state[index + 2 * self.stock_dim + 1] != True
+                #和上面的sell一样，暂时都是True
+                # self.state[index + 2 * self.stock_dim + 1] != True
+                True
             ):  # check if the stock is able to buy
                 # if self.state[index + 1] >0:
                 # Buy only if the price is > 0 (no missing data in this particular date)
                 available_amount = self.state[0] // (
-                    self.state[index + 1] * (1 + self.buy_cost_pct[index])
+                    self.state[index +(self.rebalancing_period-1)*self.stock_dim+ 1] * (1 + self.buy_cost_pct[index])
                 )  # when buying stocks, we should consider the cost of trading when calculating available_amount, or we may be have cash<0
                 # print('available_amount:{}'.format(available_amount))
 
                 # update balance
                 buy_num_shares = min(available_amount, action)
                 buy_amount = (
-                    self.state[index + 1]
+                    self.state[index + (self.rebalancing_period-1)*self.stock_dim + 1]
                     * buy_num_shares
                     * (1 + self.buy_cost_pct[index])
                 )
                 self.state[0] -= buy_amount
 
-                self.state[index + self.stock_dim + 1] += buy_num_shares
+                self.state[1 + self.stock_dim*self.rebalancing_period +index] += buy_num_shares
 
                 self.cost += (
-                    self.state[index + 1] * buy_num_shares * self.buy_cost_pct[index]
+                    self.state[index + self.rebalancing_period*self.stock_dim+1] * buy_num_shares * self.buy_cost_pct[index]
                 )
                 self.trades += 1
             else:
@@ -236,6 +242,11 @@ class StockTradingEnv(gym.Env):
 
     def step(self, actions):
         
+        # print(f"{len(self.actions_memory)}")
+        # print(f"{len(self.date_memory)}")
+        # print(f"{len(self.asset_memory)}")
+
+        
         self.terminal = self.day >= (len(self.df.index.unique()) - self.rebalancing_period)
         history_close_num=(self.rebalancing_period-1) * self.stock_dim
         if self.terminal:
@@ -243,10 +254,19 @@ class StockTradingEnv(gym.Env):
             if self.make_plots:
                 self._make_plot()
             
+            # end_total_asset = self.state[0] + sum(
+            #     np.array(self.state[1 : (self.stock_dim + 1)])
+            #     * np.array(self.state[(self.stock_dim + 1) : (self.stock_dim * 2 + 1)])
+            # )
+
             end_total_asset = self.state[0] + sum(
-                np.array(self.state[1 : (self.stock_dim + 1)])
-                * np.array(self.state[(self.stock_dim + 1) : (self.stock_dim * 2 + 1)])
+                #rebalancing_period最后一天的价格
+                np.array(self.state[1 +history_close_num: (self.stock_dim + 1) + history_close_num])
+                #持仓数量
+                # * np.array(self.state[(self.stock_dim + 1) : (self.stock_dim * 2 + 1)])
+                * np.array(self.state[(self.stock_dim * self.rebalancing_period + 1) : (self.stock_dim * self.rebalancing_period+ 1 +self.stock_dim)])
             )
+
             
             df_total_value = pd.DataFrame(self.asset_memory)
 
@@ -281,7 +301,7 @@ class StockTradingEnv(gym.Env):
                 )
             df_rewards = pd.DataFrame(self.rewards_memory)
             df_rewards.columns = ["account_rewards"]
-            df_rewards["date"] = self.date_memory[:-1]
+            df_rewards["date"] = self.date_memory[:-1][0::self.rebalancing_period]
             if self.episode % self.print_verbosity == 0:
                 print(f"day: {self.day}, episode: {self.episode}")
                 print(f"begin_total_asset: {self.asset_memory[0]:0.2f}")
@@ -359,6 +379,9 @@ class StockTradingEnv(gym.Env):
 
             argsort_actions = np.argsort(actions)
             sell_index = argsort_actions[: np.where(actions < 0)[0].shape[0]]
+
+            # print(actions[sell_index])
+
             buy_index = argsort_actions[::-1][: np.where(actions > 0)[0].shape[0]]
             
 
@@ -367,13 +390,14 @@ class StockTradingEnv(gym.Env):
                 # print(f'take sell action before : {actions[index]}')
                 actions[index] = self._sell_stock(index, actions[index]) * (-1)
                 # print(f'take sell action after : {actions[index]}')
+                # print(f'take sell action after : {actions[index]}')
                 # print(f"Num shares after: {self.state[index+self.stock_dim+1]}")
 
             for index in buy_index:
                 # print('take buy action: {}'.format(actions[index]))
                 actions[index] = self._buy_stock(index, actions[index])
 
-            self.actions_memory.append(actions)
+            
             
             # state: s -> s+1
             # 每一个step day 加上rb period
@@ -397,8 +421,26 @@ class StockTradingEnv(gym.Env):
                 # * np.array(self.state[(self.stock_dim + 1) : (self.stock_dim * 2 + 1)])
                 * np.array(self.state[(self.stock_dim * self.rebalancing_period + 1) : (self.stock_dim * self.rebalancing_period+ 1 +self.stock_dim)])
             )
-            self.asset_memory.append(end_total_asset)
-            self.date_memory.append(self._get_date())
+
+            for d in range(0,self.rebalancing_period):
+
+                self.actions_memory.append(np.zeros(self.stock_dim))
+
+                temp_assert=self.state[0] + sum(
+                    #rebalancing_period最后一天的价格
+                    np.array(self.state[1 +d*self.stock_dim: 1 + d*self.stock_dim + self.stock_dim])
+                    #持仓数量
+                    # * np.array(self.state[(self.stock_dim + 1) : (self.stock_dim * 2 + 1)])
+                    * np.array(self.state[(self.stock_dim * self.rebalancing_period + 1) : (self.stock_dim * self.rebalancing_period+ 1 +self.stock_dim)])
+                )
+                self.asset_memory.append(temp_assert)
+            # self.asset_memory.append(end_total_asset)
+                
+            self.actions_memory[-1]=actions
+
+            self.date_memory+=self._get_date()
+
+
             self.reward = end_total_asset - begin_total_asset
             self.rewards_memory.append(self.reward)
             self.reward = self.reward * self.reward_scaling
@@ -415,9 +457,13 @@ class StockTradingEnv(gym.Env):
         options=None,
     ):
         # initiate state
-        self.day = 0
-        self.data = self.df.loc[self.day, :]
+        self.day = self.rebalancing_period-1
+        self.data = self.df.loc[0:self.day, :]
         self.state = self._initiate_state()
+
+        self.rewards_memory = []
+        self.date_memory = [self.df.date.unique()[0]]
+        self.actions_memory = [np.zeros(self.stock_dim)]
 
         if self.initial:
             self.asset_memory = [
@@ -428,6 +474,7 @@ class StockTradingEnv(gym.Env):
                 )
             ]
         else:
+            print("应该不会触发")
             previous_total_asset = self.previous_state[0] + sum(
                 np.array(self.state[1 : (self.stock_dim + 1)])
                 * np.array(
@@ -441,9 +488,6 @@ class StockTradingEnv(gym.Env):
         self.trades = 0
         self.terminal = False
         # self.iteration=self.iteration
-        self.rewards_memory = []
-        self.actions_memory = []
-        self.date_memory = [self._get_date()]
 
         self.episode += 1
 
@@ -474,6 +518,8 @@ class StockTradingEnv(gym.Env):
                         [],
                     )
                 )  # append initial stocks_share to initial state, instead of all zero  
+
+                
 
             else:
                 # for single stock
@@ -521,7 +567,7 @@ class StockTradingEnv(gym.Env):
             state = (
                 [self.state[0]]
                 + self.data.close.values.tolist()
-                + list(self.state[(self.stock_dim + 1) : (self.stock_dim * 2 + 1)])
+                + list(self.state[(1+self.stock_dim*self.rebalancing_period) : (1+ self.stock_dim * self.rebalancing_period+ self.stock_dim)])
                 + sum(
                     (
                         self.data[tech].values.tolist()
@@ -544,9 +590,10 @@ class StockTradingEnv(gym.Env):
 
     def _get_date(self):
         if len(self.df.tic.unique()) > 1:
-            date = self.data.date.unique()[0]
+            date = self.data.date.unique().tolist()
         else:
             date = self.data.date
+        
         return date
 
     # add save_state_memory to preserve state in the trading process
@@ -599,7 +646,7 @@ class StockTradingEnv(gym.Env):
             
 
             action_list = self.actions_memory
-            df_actions = pd.DataFrame(action_list)
+            df_actions = pd.DataFrame(action_list[1:])
             
             # print(df_actions)
 

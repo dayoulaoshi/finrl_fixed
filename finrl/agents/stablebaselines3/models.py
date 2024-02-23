@@ -123,6 +123,7 @@ class DRLAgent:
             # print(f"iteration:{i}/{}",)
             if i == (int(len(environment.df.index.unique())/rebalance_period) - 2):
                 account_memory = test_env.env_method(method_name="save_asset_memory")
+                
                 actions_memory = test_env.env_method(method_name="save_action_memory")
             #                 state_memory=test_env.env_method(method_name="save_state_memory") # add current state to state memory
             if dones[0]:
